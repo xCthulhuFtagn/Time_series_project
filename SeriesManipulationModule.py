@@ -6,23 +6,29 @@ import logging
 import datetime
 
 class AnomalyCatcher:
-    def __init__(self, methods=None, auto_debug=True):
+    def __init__(self, methods=None, auto_debug=True, window_size=60, adfuller_p_value=0.05, moving_std_multiplier=2, cusum_threshold=1, isolation_forest_contamination=0.01):
         if methods is None:
             methods = ['adfuller', 'moving_std', 'cusum', 'isolation_forest']
         self.methods = methods
         self.auto_debug = auto_debug
+        self.window_size = window_size
+        self.adfuller_p_value = adfuller_p_value
+        self.moving_std_multiplier = moving_std_multiplier
+        self.cusum_threshold = cusum_threshold
+        self.isolation_forest_contamination = isolation_forest_contamination
 
     def detect_anomalies(self, data):
-        anomalies = np.array([], dtype=int)  # Указываем явно тип данных
-        if 'adfuller' in self.methods:
-            anomalies = np.union1d(anomalies, self._adfuller_test(data).astype(int))
-        if 'moving_std' in self.methods:
-            anomalies = np.union1d(anomalies, self._moving_std_test(data).astype(int))
-        if 'cusum' in self.methods:
-            anomalies = np.union1d(anomalies, self._cusum_test(data).astype(int))
-        if 'isolation_forest' in self.methods:
-            anomalies = np.union1d(anomalies, self._isolation_forest_test(data).astype(int))
-
+        anomalies = np.array([], dtype=int)
+        for method in self.methods:
+            if method == 'adfuller':
+                anomalies = np.union1d(anomalies, self._adfuller_test(data))
+            elif method == 'moving_std':
+                anomalies = np.union1d(anomalies, self._moving_std_test(data))
+            elif method == 'cusum':
+                anomalies = np.union1d(anomalies, self._cusum_test(data))
+            elif method == 'isolation_forest':
+                anomalies = np.union1d(anomalies, self._isolation_forest_test(data))
+        
         if len(anomalies) > 0:
             self._visualize_anomalies(data, anomalies)
             print("Anomalies detected!")
@@ -34,40 +40,45 @@ class AnomalyCatcher:
             print("No anomalies detected.")
         return anomalies
 
-
-    def _adfuller_test(self, data, significance=0.05):
-        result = adfuller(data)
+    def _adfuller_test(self, data):
+        result = adfuller(data[-self.window_size:])
         p_value = result[1]
-        if p_value > significance:
+        if p_value > self.adfuller_p_value:
             return np.array([len(data)-1])
         return np.array([])
 
-    def _moving_std_test(self, data, window=30, multiplier=2):
-        moving_avg = np.mean(data[-window:])
-        moving_std = np.std(data[-window:])
-        relative_anomalies = np.where((data[-window:] - moving_avg) > multiplier * moving_std)[0]
-        absolute_anomalies = relative_anomalies + (len(data) - window)
-        return absolute_anomalies.astype(int)  # Приведение типов к integer
+    def _moving_std_test(self, data):
+        if len(data) < self.window_size:
+            return np.array([])
+        moving_avg = np.mean(data[-self.window_size:])
+        moving_std = np.std(data[-self.window_size:])
+        anomalies = np.where((data[-self.window_size:] - moving_avg) > self.moving_std_multiplier * moving_std)[0]
+        return anomalies + len(data) - self.window_size
 
-
-    def _cusum_test(self, data, threshold=5):
-        mean = np.mean(data)
-        cumsum_values = np.cumsum(data - mean)
-        significant_changes = np.where((cumsum_values > threshold) | (cumsum_values < -threshold))[0]
-        return significant_changes
+    def _cusum_test(self, data):
+        if len(data) < self.window_size:
+            return np.array([])
+        data_segment = data[-self.window_size:]
+        mean = np.mean(data_segment)
+        cumsum_values = np.cumsum(data_segment - mean)
+        anomalies = np.where((cumsum_values > self.cusum_threshold) | (cumsum_values < -self.cusum_threshold))[0]
+        return anomalies + len(data) - self.window_size
 
     def _isolation_forest_test(self, data):
-        clf = IsolationForest(contamination=0.01)
-        clf.fit(data.reshape(-1, 1))
-        predictions = clf.predict(data.reshape(-1, 1))
-        return np.where(predictions == -1)[0]
+        if len(data) < self.window_size:
+            return np.array([])
+        data_segment = data[-self.window_size:].reshape(-1, 1)
+        clf = IsolationForest(contamination=self.isolation_forest_contamination)
+        clf.fit(data_segment)
+        predictions = clf.predict(data_segment)
+        return np.where(predictions == -1)[0] + len(data) - self.window_size
 
     def _visualize_anomalies(self, data, anomalies):
         plt.figure(figsize=(10, 4))
         plt.plot(data, label='Data')
-        # Проверка и фильтрация
-        valid_anomalies = anomalies[(anomalies < len(data)) & (anomalies >= 0)]
+        valid_anomalies = anomalies[anomalies < len(data)]
         plt.scatter(valid_anomalies, data[valid_anomalies], color='red', label='Anomalies')
+        plt.axvspan(len(data) - self.window_size, len(data), color='yellow', alpha=0.3, label='Analysis Window')
         plt.legend()
         plt.show()
 
@@ -76,34 +87,35 @@ class AnomalyCatcher:
 
 
 class RetrainingManager:
-    def __init__(self, model, anomaly_catcher, data, strategy='basic', logger=None):
+    def __init__(self, model, anomaly_catcher, data, period = 60, strategy='none', logger=None):
         self.model = model
         self.anomaly_catcher = anomaly_catcher
         self.data = data
         self.strategy = strategy
         self.logger = logger or logging.getLogger(__name__)
         self.last_retraining_info = {}  # Словарь для хранения информации о последнем дообучении
-
-    def determine_retraining_period(self):
-        self.logger.info("Determining retraining period based on detected anomalies.")
-        anomalies = self.anomaly_catcher.detect_anomalies(self.data)
-        if len(anomalies) > 0:
-            period = self._apply_strategy(anomalies)
-            self.logger.info(f"Retraining period set to {period} days due to anomalies.")
-            return period
-        return 60
+        self.period = period
     
-    def retrain_model(self, period):
+        def predict(self, new_data):
+            if hasattr(self.model, 'predict'):
+                predictions = self.model.predict(new_data)
+                self.logger.info("Generated predictions.")
+                return predictions
+            else:
+                self.logger.error("Model does not support prediction.")
+                raise NotImplementedError("Model does not have a predict method.")
+        
+    def retrain_model(self):
         self.logger.info(f"Retraining the model using data from the last {period} days...")
-        training_data = self.data[-period:]
+        training_data = self.data[-self.period:]
         self.model.fit(training_data) # Предположим, здесь происходит дообучение
         self.last_retraining_info = {
-            'period': period,
+            'period': self.period,
             'timestamp': datetime.datetime.now(),
             'data_points_used': len(training_data)
         }
         self.logger.info("Model retrained successfully.")
-        return "Model retrained successfully for period: " + str(period) + " days"
+        return "Model retrained successfully for period: " + str(self.period) + " days"
     
     def generate_retraining_report(self):
         if self.last_retraining_info:
@@ -117,22 +129,22 @@ class RetrainingManager:
             return "No retraining has been performed yet."
             
     def _apply_strategy(self, anomalies):
+        # По дефолту, стратегия отключена и не будет работать        
         if self.strategy == 'basic':
             # Базовая стратегия: количество дней обратно пропорционально количеству аномалий
-            return max(7, 30 // len(anomalies))
+            self.period = max(7, self.period // (1 + len(anomalies)))
         elif self.strategy == 'statistical':
             # Статистическая стратегия: использование меры изменчивости данных
-            std_dev = np.std(self.data)
-            if std_dev > 1.0:
-                return 7  # Частое дообучение при высокой изменчивости
+            std_dev_factor = max(1, np.std(self.data[-self.period:]) / np.std(self.data))
+            self.period = max(7, int(self.period * std_dev_factor))
             else:
-                return 30  # Реже дообучаем при низкой изменчивости
+                self.period = 30  # Реже дообучаем при низкой изменчивости
         elif self.strategy == 'adaptive':
-            # Адаптивная стратегия: анализируем диапазон данных за последние 30 дней
-            recent_range = np.ptp(self.data[-30:])
-            return max(7, int(30 * (1 - recent_range / np.ptp(self.data))))
+            recent_change = np.ptp(self.data[-self.period:])
+            total_change = np.ptp(self.data)
+            adaptive_period = int(self.period * (1 - recent_change / total_change))
         else:
-            return 30  # Фоллбэк стратегия
+            self.period = self.period
 
 
 if __name__ == "__main__":
