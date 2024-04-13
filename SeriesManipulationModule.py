@@ -65,7 +65,7 @@ class AnomalyCatcher:
     def _visualize_anomalies(self, data, anomalies):
         plt.figure(figsize=(10, 4))
         plt.plot(data, label='Data')
-        # Проверка и фильтрация: Убедитесь, что anomalies содержит только допустимые целочисленные индексы
+        # Проверка и фильтрация
         valid_anomalies = anomalies[(anomalies < len(data)) & (anomalies >= 0)]
         plt.scatter(valid_anomalies, data[valid_anomalies], color='red', label='Anomalies')
         plt.legend()
@@ -96,7 +96,7 @@ class RetrainingManager:
     def retrain_model(self, period):
         self.logger.info(f"Retraining the model using data from the last {period} days...")
         training_data = self.data[-period:]
-        # self.model.fit(training_data) # Предположим, здесь происходит дообучение
+        self.model.fit(training_data) # Предположим, здесь происходит дообучение
         self.last_retraining_info = {
             'period': period,
             'timestamp': datetime.datetime.now(),
