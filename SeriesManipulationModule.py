@@ -9,82 +9,91 @@ import datetime
 from IPython.display import display
 
 
-class AnomalyCatcher:
-    def __init__(self, methods=None, auto_debug=True, window_size=60, adfuller_p_value=0.05, moving_std_multiplier=2, cusum_threshold=1, isolation_forest_contamination=0.01):
-        if methods is None:
-            methods = ['adfuller', 'moving_std', 'cusum', 'isolation_forest']
-        self.methods = methods
-        self.auto_debug = auto_debug
-        self.window_size = window_size
-        self.adfuller_p_value = adfuller_p_value
-        self.moving_std_multiplier = moving_std_multiplier
-        self.cusum_threshold = cusum_threshold
-        self.isolation_forest_contamination = isolation_forest_contamination
+class Stat:
+    def __init__(self, threshold, direction="unknown", init_stat=0.0):
+        self.threshold = threshold
+        self.direction = direction
+        self._stat = init_stat
 
-    def detect_anomalies(self, data):
-        anomalies = np.array([], dtype=int)
-        display(data)
-        for method in self.methods:
-            if method == 'adfuller':
-                anomalies = np.union1d(anomalies, self._adfuller_test(data))
-            elif method == 'moving_std':
-                anomalies = np.union1d(anomalies, self._moving_std_test(data))
-            elif method == 'cusum':
-                anomalies = np.union1d(anomalies, self._cusum_test(data))
-            elif method == 'isolation_forest':
-                anomalies = np.union1d(anomalies, self._isolation_forest_test(data))
+    def update(self, value):
+        raise NotImplementedError("Must be implemented by subclass.")
+
+class AdjustedCusum(Stat):
+    def __init__(self, mean_diff, threshold, direction="unknown", init_stat=0.0):
+        super().__init__(threshold, direction, init_stat)
+        self.mean_diff = mean_diff
         
-        if len(anomalies) > 0:
-            self._visualize_anomalies(data, anomalies)
-            print("Anomalies detected!")
-            if self.auto_debug:
-                print("Automatic debugging initiated.")
-            else:
-                print("Manual debugging required.")
-        else:
-            print("No anomalies detected.")
-        return anomalies
+    def update(self, value):
+        zeta_k = value - self.mean_diff / 2
+        self._stat = max(0, self._stat + zeta_k)
+        if self._stat > self.threshold:
+            return True
+        return False
 
-    def _adfuller_test(self, data):
-        result = adfuller(data[-self.window_size:])
-        p_value = result[1]
-        if p_value > self.adfuller_p_value:
-            return np.array([len(data)-1])
-        return np.array([])
+class MeanExp:
+    def __init__(self, new_value_weight):
+        self._new_value_weight = new_value_weight
+        self._values_sum = 0.0
+        self._weights_sum = 0.0
 
-    def _moving_std_test(self, data):
-        if len(data) < self.window_size:
-            return np.array([])
-        moving_avg = np.mean(data[-self.window_size:])
-        moving_std = np.std(data[-self.window_size:])
-        anomalies = np.where((data[-self.window_size:] - moving_avg) > self.moving_std_multiplier * moving_std)[0]
-        return anomalies + len(data) - self.window_size
+    def update(self, new_value):
+        self._values_sum = (1 - self._new_value_weight) * self._values_sum + new_value
+        self._weights_sum = (1 - self._new_value_weight) * self._weights_sum + 1.0
 
-    def _cusum_test(self, data):
-        if len(data) < self.window_size:
-            return np.array([])
-        data_segment = data[-self.window_size:]
-        mean = np.mean(data_segment)
-        cumsum_values = np.cumsum(data_segment - mean)
-        anomalies = np.where((cumsum_values > self.cusum_threshold) | (cumsum_values < -self.cusum_threshold))[0]
-        return anomalies + len(data) - self.window_size
+    def value(self):
+        if self._weights_sum <= 1:
+            raise Exception('Not enough data')
+        return self._values_sum / self._weights_sum
 
-    def _isolation_forest_test(self, data):
-        if len(data) < self.window_size:
-            return np.array([])
-        data_segment = data[-self.window_size:].reshape(-1, 1)
-        clf = IsolationForest(contamination=self.isolation_forest_contamination)
-        clf.fit(data_segment)
-        predictions = clf.predict(data_segment)
-        return np.where(predictions == -1)[0] + len(data) - self.window_size
+class AnomalyCatcher:
+    def __init__(self, new_value_weight_mean=0.01, new_value_weight_var=0.01, mean_diff=1.0, cusum_threshold=30):
+        self.mean_estimator = MeanExp(new_value_weight_mean)
+        self.variance_estimator = MeanExp(new_value_weight_var)
+        self.cusum = AdjustedCusum(mean_diff, cusum_threshold)
 
-    def _visualize_anomalies(self, data, anomalies):
-        plt.figure(figsize=(10, 4))
-        plt.plot(data, label='Data')
-        valid_anomalies = anomalies[anomalies < len(data)]
-        plt.scatter(valid_anomalies, data[valid_anomalies], color='red', label='Anomalies')
-        plt.axvspan(len(data) - self.window_size, len(data), color='yellow', alpha=0.3, label='Analysis Window')
+    def process(self, data):
+        mean_values, var_values, cusum_values = [], [], []
+        for x in data:
+            try:
+                mean_estimate = self.mean_estimator.value()
+            except Exception:
+                mean_estimate = 0.
+            try:
+                var_estimate = self.variance_estimator.value()
+            except Exception:
+                var_estimate = 1.
+
+            adjusted_value = (x - mean_estimate) / np.sqrt(var_estimate)
+            cusum_trigger = self.cusum.update(adjusted_value)
+            
+            self.mean_estimator.update(x)
+            diff_value = (x - mean_estimate) ** 2
+            self.variance_estimator.update(diff_value)
+            
+            mean_values.append(mean_estimate)
+            var_values.append(np.sqrt(var_estimate))
+            cusum_values.append(self.cusum._stat)
+
+        return mean_values, var_values, cusum_values, cusum_trigger
+
+    def visualize(self, data, mean_estimates, var_estimates):
+        plt.figure(figsize=(12, 6))
+        times = np.arange(len(data))
+        
+        # Data and mean
+        plt.plot(times, data, label="Data", color='blue', alpha=0.5)
+        plt.plot(times, mean_estimates, label="Estimated Mean", color='black')
+        
+        # Variance as shaded area
+        upper_bound = np.array(mean_estimates) + np.array(var_estimates)
+        lower_bound = np.array(mean_estimates) - np.array(var_estimates)
+        plt.fill_between(times, lower_bound, upper_bound, color='gray', alpha=0.3, label='Estimated Variance')
+        
+        plt.title("Data with Estimated Mean and Variance")
+        plt.xlabel("Time")
+        plt.ylabel("Value")
         plt.legend()
+        plt.grid(True)
         plt.show()
 
 
@@ -107,7 +116,7 @@ class RetrainingManager:
 
     def initiate_detection(self) -> bool:
         anomalies = self.anomaly_catcher.detect_anomalies(self.data_y[-self.anomaly_catcher.window_size * 2:])
-        return anomalies == []
+        return anomalies.size == 0
 
     def predict(self):
         if hasattr(self.model, 'predict'):
