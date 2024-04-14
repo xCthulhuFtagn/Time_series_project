@@ -33,6 +33,7 @@ class FeatureSelector():
         if self.X_exog is not None: return sub_X
         else: return sub_X_exog
 
+#Данный метод выбран так как он позволяет не тюнить количество фичей которые мы должны выбрать, а использует трешхолд, основанный на MAE
 def sequentialFeatureSelection(model, X, y):
     sfs = SFS(
       estimator = model,
@@ -44,14 +45,15 @@ def sequentialFeatureSelection(model, X, y):
     sfs = sfs.fit(X, y)
     return sfs.get_feature_names_out()
 
-
+#Данный метод выбран так как он позволяет исследовать нелинейные зависимости
 def mutualInfoSelection(X, y):
     selector = SelectPercentile(mutual_info_regression, percentile=25)
     selector.fit_transform(X, y)
     cols = selector.get_support(indices=True)
     selected_columns = X.iloc[:,cols].columns.tolist()
     return selected_columns
-    
+   
+#Функция которая проверят стабильность по разбиению данных по годам
 def getStabilityOnYearsSplit(fs):
     y_years = splitDfByYears(fs.y)
     X_endog_years = splitDfByYears(fs.X_endog)
