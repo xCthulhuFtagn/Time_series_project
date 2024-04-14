@@ -46,14 +46,15 @@ class MeanExp:
         return self._values_sum / self._weights_sum
 
 class AnomalyCatcher:
-    def __init__(self, new_value_weight_mean=0.01, new_value_weight_var=0.01, mean_diff=1.0, cusum_threshold=30):
+    def __init__(self, new_value_weight_mean=0.01, new_value_weight_var=0.01, mean_diff=1.0, cusum_threshold=30, window_size=30):
         self.mean_estimator = MeanExp(new_value_weight_mean)
         self.variance_estimator = MeanExp(new_value_weight_var)
         self.cusum = AdjustedCusum(mean_diff, cusum_threshold)
+        self.window_size = window_size  # Добавление размера окна как параметра класса
 
     def process(self, data):
         mean_values, var_values, cusum_values = [], [], []
-        for x in data:
+        for x in data[-self.window_size:]:  # Ограничение анализа последними window_size точками
             try:
                 mean_estimate = self.mean_estimator.value()
             except Exception:
@@ -78,20 +79,21 @@ class AnomalyCatcher:
 
     def visualize(self, data, mean_estimates, var_estimates):
         plt.figure(figsize=(12, 6))
-        times = np.arange(len(data))
+        times = np.arange(len(data))[-self.window_size:]
+        data = data[-self.window_size:]
+        mean_estimates = mean_estimates[-self.window_size:]
+        var_estimates = var_estimates[-self.window_size:]
         
-        # Data and mean
         plt.plot(times, data, label="Data", color='blue', alpha=0.5)
         plt.plot(times, mean_estimates, label="Estimated Mean", color='black')
         
-        # Variance as shaded area
         upper_bound = np.array(mean_estimates) + np.array(var_estimates)
         lower_bound = np.array(mean_estimates) - np.array(var_estimates)
         plt.fill_between(times, lower_bound, upper_bound, color='gray', alpha=0.3, label='Estimated Variance')
         
         plt.title("Data with Estimated Mean and Variance")
-        plt.xlabel("Time")
-        plt.ylabel("Value")
+        plt.xlabel("Time Index")
+        plt.ylabel("Values")
         plt.legend()
         plt.grid(True)
         plt.show()
