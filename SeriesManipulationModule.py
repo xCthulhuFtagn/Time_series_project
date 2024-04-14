@@ -1,9 +1,13 @@
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.ensemble import IsolationForest
 from statsmodels.tsa.stattools import adfuller
 import logging
 import datetime
+
+from IPython.display import display
+
 
 class AnomalyCatcher:
     def __init__(self, methods=None, auto_debug=True, window_size=60, adfuller_p_value=0.05, moving_std_multiplier=2, cusum_threshold=1, isolation_forest_contamination=0.01):
@@ -19,6 +23,7 @@ class AnomalyCatcher:
 
     def detect_anomalies(self, data):
         anomalies = np.array([], dtype=int)
+        display(data)
         for method in self.methods:
             if method == 'adfuller':
                 anomalies = np.union1d(anomalies, self._adfuller_test(data))
@@ -83,36 +88,46 @@ class AnomalyCatcher:
         plt.show()
 
 
-
-
-
 class RetrainingManager:
     def __init__(self, model, anomaly_catcher, data, period = 60, strategy='none', logger=None):
         self.model = model
         self.anomaly_catcher = anomaly_catcher
-        self.data = data
+        self.data_x, self.data_y = data[0], data[1] 
         self.strategy = strategy
         self.logger = logger or logging.getLogger(__name__)
         self.last_retraining_info = {}  # Словарь для хранения информации о последнем дообучении
         self.period = period
-    
-        def predict(self, new_data):
-            if hasattr(self.model, 'predict'):
-                predictions = self.model.predict(new_data)
-                self.logger.info("Generated predictions.")
-                return predictions
-            else:
-                self.logger.error("Model does not support prediction.")
-                raise NotImplementedError("Model does not have a predict method.")
+        
+    def update(self, new_data):
+        # print(f"{new_data[0]}")
+        # print(f"{new_data[1]}")
+        self.data_x.loc[self.data_x.index[-1] + datetime.timedelta(days=1)] = new_data[0]
+        self.data_y.loc[self.data_y.index[-1] + datetime.timedelta(days=1)] = new_data[1]
+
+
+    def initiate_detection(self) -> bool:
+        anomalies = self.anomaly_catcher.detect_anomalies(self.data_y[-self.anomaly_catcher.window_size * 2:])
+        return anomalies == []
+
+    def predict(self):
+        if hasattr(self.model, 'predict'):
+            predictions = self.model.predict(self.data)
+            self.logger.info("Generated predictions.")
+            return predictions
+        else:
+            self.logger.error("Model does not support prediction.")
+            raise NotImplementedError("Model does not have a predict method.")
         
     def retrain_model(self):
-        self.logger.info(f"Retraining the model using data from the last {period} days...")
-        training_data = self.data[-self.period:]
-        self.model.fit(training_data) # Предположим, здесь происходит дообучение
+        self.logger.info(f"Retraining the model using data from the last {self.period} days...")
+        X_train, y_train = self.data_x[-self.period:], self.data_y[-self.period:]
+        # display(X_train)
+        # display(y_train)
+        self.model.fit(X_train, y_train) # Предположим, здесь происходит дообучение
         self.last_retraining_info = {
             'period': self.period,
             'timestamp': datetime.datetime.now(),
-            'data_points_used': len(training_data)
+            'data_points_used': self.period
         }
         self.logger.info("Model retrained successfully.")
         return "Model retrained successfully for period: " + str(self.period) + " days"
@@ -137,27 +152,9 @@ class RetrainingManager:
             # Статистическая стратегия: использование меры изменчивости данных
             std_dev_factor = max(1, np.std(self.data[-self.period:]) / np.std(self.data))
             self.period = max(7, int(self.period * std_dev_factor))
-            else:
-                self.period = 30  # Реже дообучаем при низкой изменчивости
         elif self.strategy == 'adaptive':
             recent_change = np.ptp(self.data[-self.period:])
             total_change = np.ptp(self.data)
             adaptive_period = int(self.period * (1 - recent_change / total_change))
         else:
             self.period = self.period
-
-
-if __name__ == "__main__":
-    # Пример использования
-    print("Демонстрационный режим модуля")
-    logger = logging.getLogger()
-    logging.basicConfig(level=logging.INFO)
-    model = IsolationForest()
-    anomaly_catcher = AnomalyCatcher(auto_debug=True)
-    data = np.random.normal(size=100) + np.linspace(-1, 1, 100)
-    data[40:45] += 7
-    manager = RetrainingManager(model, anomaly_catcher, data, strategy='statistical', logger=logger)
-    retraining_period = manager.determine_retraining_period()
-    retraining_result = manager.retrain_model(retraining_period)
-    report = manager.generate_retraining_report()
-    print(report)
