@@ -5,10 +5,16 @@ from sklearn.ensemble import IsolationForest
 from statsmodels.tsa.stattools import adfuller
 import logging
 import datetime
+from scipy.stats import norm
+import seaborn as sns
 
 from IPython.display import display
 
 
+def normal_likelihood(value, mean_0, mean_8, std):
+    return np.log(norm.pdf(value, mean_0, std) / 
+                norm.pdf(value, mean_8, std))
+        
 class Stat:
     def __init__(self, threshold, direction="unknown", init_stat=0.0):
         self.threshold = threshold
@@ -22,13 +28,30 @@ class AdjustedCusum(Stat):
     def __init__(self, mean_diff, threshold, direction="unknown", init_stat=0.0):
         super().__init__(threshold, direction, init_stat)
         self.mean_diff = mean_diff
-        
-    def update(self, value):
-        zeta_k = value - self.mean_diff / 2
+        self.history = []
+        self.dates = []  # Добавляем список для хранения дат
+
+    def update(self, value, date=None):
+        print(f"gotten: {value}")
+        zeta_k = normal_likelihood(value, self.mean_diff, 0., 1.)
         self._stat = max(0, self._stat + zeta_k)
-        if self._stat > self.threshold:
-            return True
-        return False
+        self.history.append(self._stat)
+        if date is not None:
+            self.dates.append(date)
+        return self._stat > self.threshold
+
+    def visualize_history(self):
+        plt.figure(figsize=(12, 6))
+        x_axis = self.dates if self.dates else list(range(len(self.history)))
+        plt.plot(x_axis, self.history, label="Cusum Statistic History", color='blue')
+        plt.axhline(y=self.threshold, color='red', linestyle='--', label='Threshold')
+        plt.title("History of Cusum Statistic Over Time")
+        plt.xlabel("Date" if self.dates else "Time Step")
+        plt.ylabel("Cusum Statistic Value")
+        plt.legend()
+        plt.grid(True)
+        plt.gcf().autofmt_xdate()  # Автоматически форматирует даты для лучшего отображения
+        plt.show()
 
 class MeanExp:
     def __init__(self, new_value_weight):
@@ -46,58 +69,47 @@ class MeanExp:
         return self._values_sum / self._weights_sum
 
 class AnomalyCatcher:
-    def __init__(self, new_value_weight_mean=0.01, new_value_weight_var=0.01, mean_diff=1.0, cusum_threshold=30, window_size=30):
+    def __init__(self, new_value_weight_mean=0.01, new_value_weight_var=0.01, mean_diff=1.0, cusum_threshold=30., window_size=30):
         self.mean_estimator = MeanExp(new_value_weight_mean)
         self.variance_estimator = MeanExp(new_value_weight_var)
         self.cusum = AdjustedCusum(mean_diff, cusum_threshold)
         self.window_size = window_size  # Добавление размера окна как параметра класса
+        self.stat_trajectory, self.mean_values, self.var_values = [], [], []
+        self.values = []
 
-    def process(self, data):
-        mean_values, var_values, cusum_values = [], [], []
-        for x in data[-self.window_size:]:  # Ограничение анализа последними window_size точками
-            try:
-                mean_estimate = self.mean_estimator.value()
-            except Exception:
-                mean_estimate = 0.
-            try:
-                var_estimate = self.variance_estimator.value()
-            except Exception:
-                var_estimate = 1.
+    def detect_anomalies(self, y):
+        try:
+            mean_estimate = self.mean_estimator.value()
+        except Exception:
+            mean_estimate = 0.
+        try:
+            var_estimate = self.variance_estimator.value()
+        except Exception:
+            var_estimate = 1.
 
-            adjusted_value = (x - mean_estimate) / np.sqrt(var_estimate)
-            cusum_trigger = self.cusum.update(adjusted_value)
-            
-            self.mean_estimator.update(x)
-            diff_value = (x - mean_estimate) ** 2
-            self.variance_estimator.update(diff_value)
-            
-            mean_values.append(mean_estimate)
-            var_values.append(np.sqrt(var_estimate))
-            cusum_values.append(self.cusum._stat)
-
-        return mean_values, var_values, cusum_values, cusum_trigger
-
-    def visualize(self, data, mean_estimates, var_estimates):
-        plt.figure(figsize=(12, 6))
-        times = np.arange(len(data))[-self.window_size:]
-        data = data[-self.window_size:]
-        mean_estimates = mean_estimates[-self.window_size:]
-        var_estimates = var_estimates[-self.window_size:]
+        adjusted_value = (y - mean_estimate) / np.sqrt(var_estimate)
+        print(f"adj: {adjusted_value}")
+        cusum_trigger = self.cusum.update(adjusted_value)
         
-        plt.plot(times, data, label="Data", color='blue', alpha=0.5)
-        plt.plot(times, mean_estimates, label="Estimated Mean", color='black')
+        self.mean_estimator.update(y)
+        diff_value = (y - mean_estimate) ** 2
+        self.variance_estimator.update(diff_value)
         
-        upper_bound = np.array(mean_estimates) + np.array(var_estimates)
-        lower_bound = np.array(mean_estimates) - np.array(var_estimates)
-        plt.fill_between(times, lower_bound, upper_bound, color='gray', alpha=0.3, label='Estimated Variance')
-        
-        plt.title("Data with Estimated Mean and Variance")
-        plt.xlabel("Time Index")
-        plt.ylabel("Values")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        self.values.append(y)
+        self.stat_trajectory.append(self.cusum._stat)
+        self.mean_values.append(mean_estimate)
+        self.var_values.append(np.sqrt(var_estimate))
 
+        return cusum_trigger
+
+    def visualize_mean_variance(self,ax=None):
+        sns.lineplot(self.values,ax=None)
+        sns.lineplot(np.array(self.mean_values),ax=ax)
+        sns.lineplot(np.array(self.mean_values) + np.sqrt(self.var_values),ax=ax)
+        sns.lineplot(np.array(self.mean_values) - np.sqrt(self.var_values),ax=ax)
+
+    def visualize_stat_trajectory(self,ax=None):
+        sns.lineplot(self.stat_trajectory, ax=ax)
 
 class RetrainingManager:
     def __init__(self, model, anomaly_catcher, data, period = 60, strategy='none', logger=None):
@@ -108,17 +120,9 @@ class RetrainingManager:
         self.logger = logger or logging.getLogger(__name__)
         self.last_retraining_info = {}  # Словарь для хранения информации о последнем дообучении
         self.period = period
-        
-    def update(self, new_data):
-        # print(f"{new_data[0]}")
-        # print(f"{new_data[1]}")
-        self.data_x.loc[self.data_x.index[-1] + datetime.timedelta(days=1)] = new_data[0]
-        self.data_y.loc[self.data_y.index[-1] + datetime.timedelta(days=1)] = new_data[1]
 
-
-    def initiate_detection(self) -> bool:
-        anomalies = self.anomaly_catcher.detect_anomalies(self.data_y[-self.anomaly_catcher.window_size * 2:])
-        return anomalies.size == 0
+    def detect(self, y) -> bool:
+        return self.anomaly_catcher.detect_anomalies(y)
 
     def predict(self):
         if hasattr(self.model, 'predict'):
@@ -132,8 +136,7 @@ class RetrainingManager:
     def retrain_model(self):
         self.logger.info(f"Retraining the model using data from the last {self.period} days...")
         X_train, y_train = self.data_x[-self.period:], self.data_y[-self.period:]
-        # display(X_train)
-        # display(y_train)
+
         self.model.fit(X_train, y_train) # Предположим, здесь происходит дообучение
         self.last_retraining_info = {
             'period': self.period,
@@ -153,19 +156,3 @@ class RetrainingManager:
             return report
         else:
             return "No retraining has been performed yet."
-            
-    def _apply_strategy(self, anomalies):
-        # По дефолту, стратегия отключена и не будет работать        
-        if self.strategy == 'basic':
-            # Базовая стратегия: количество дней обратно пропорционально количеству аномалий
-            self.period = max(7, self.period // (1 + len(anomalies)))
-        elif self.strategy == 'statistical':
-            # Статистическая стратегия: использование меры изменчивости данных
-            std_dev_factor = max(1, np.std(self.data[-self.period:]) / np.std(self.data))
-            self.period = max(7, int(self.period * std_dev_factor))
-        elif self.strategy == 'adaptive':
-            recent_change = np.ptp(self.data[-self.period:])
-            total_change = np.ptp(self.data)
-            adaptive_period = int(self.period * (1 - recent_change / total_change))
-        else:
-            self.period = self.period
